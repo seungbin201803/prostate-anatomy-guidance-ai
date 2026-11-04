@@ -5,7 +5,7 @@ Code for training, fine-tuning and running 3D deep-learning classifiers of prost
 
 The pipeline:
 
-- preprocess images (resamplling and cropping centered at given prostate masks).
+- preprocesses the images (resampling, and cropping centered on the given prostate masks).
 - uses T2-weighted, DWI and ADC volumes, stacked as input channels.
 - optionally adds a **segmentation-mask channel**. You provide the masks (e.g. prostate zones) with any integer labels, and the labels are normalized internally.
 - predicts **PI-RADS** (ordinal classification, CORAL loss) or **clinically significant prostate cancer** (csPCa; binary classification, cross-entropy loss) per exam.
@@ -52,7 +52,7 @@ Python ≥ 3.10 and a CUDA GPU are recommended (bf16 mixed precision is used on 
 testing).
 
 ```bash
-git clone <this repository> && cd prostate-anatomy-guidance-ai
+git clone https://github.com/seungbin201803/prostate-anatomy-guidance-ai.git && cd prostate-anatomy-guidance-ai
 conda create -n pagai python=3.11 && conda activate pagai
 pip install torch --index-url https://download.pytorch.org/whl/cu121   # matching your CUDA
 pip install -r requirements.txt
@@ -175,8 +175,9 @@ Each run is written to `--out_dir/--run_name`. Choose the task, model and mask w
 | mask | `--seg_dir data/processed/<dataset>/seg --seg_labels <your labels>` |
 | splits | the `split` column of `dataset.csv`, or `--split_dir data/splits/<dataset>` |
 
-To train every combination in our experiments (2 tasks × 3 models × no mask / mask = 12 runs), loop
-over them, or submit each command as its own cluster job:
+To train every combination (2 tasks × 3 models × no mask / mask = 12 runs), loop over them, or submit
+each command as its own cluster job. Our experiments ran the mask runs twice, with 2-zone and 5-zone
+masks (18 runs, see [Pretrained weights](#pretrained-weights)):
 
 ```bash
 for model in vit resnet18 resnet50; do
