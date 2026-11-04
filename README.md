@@ -4,7 +4,6 @@ Code for training, fine-tuning and running 3D deep-learning classifiers of prost
 (mpMRI), with or without **prostate zonal segmentation masks** as an anatomical guidance. 
 
 - The data used in our experiments is not public.
-<!--- [Data](#1-data) explains how to organize your own data.-->
 - Trained model weights: [Pretrained weights](#pretrained-weights).
 
 The pipeline:
@@ -72,13 +71,6 @@ and its outputs are git-ignored (and removed at the start of each run):-->
 bash tools/smoke_test.sh
 ```
 
-| folder | contents |
-|---|---|
-| `data_synthetic/` | `internal` (20 cases) and `external` (15 cases), in the [`data/`](#1-data) layout: `raw/`, `seg_raw/`, `prostate_raw/`, `csv/` (with labels), `splits/`, and `processed/` |
-| `runs_synthetic/scratch/` | from-scratch runs on `internal`, both tasks × no mask / mask |
-| `runs_synthetic/finetune/external/` | the three fine-tuning variants on `external`, both tasks |
-| `results_synthetic/external/` | predictions and scores of every fine-tuned run |
-
 To generate only the synthetic data, without running the pipeline:
 
 ```bash
@@ -92,20 +84,27 @@ done
 ```
 <!--The commands below then work on it with `data/` replaced by `data_synthetic/`. -->
 
+Outputs:
+| folder | contents |
+|---|---|
+| `data_synthetic/` | `internal` (20 cases) and `external` (15 cases), in the [`data/`](#1-data) layout: `raw/`, `seg_raw/`, `prostate_raw/`, `csv/` (with labels), `splits/`, and `processed/` |
+| `runs_synthetic/scratch/` | from-scratch runs on `internal`, both tasks × no mask / mask |
+| `runs_synthetic/finetune/external/` | the three fine-tuning variants on `external`, both tasks |
+| `results_synthetic/external/` | predictions and scores of every fine-tuned run |
+
 ## 1. Data
 
 Organize each cohort (`<dataset>`, e.g. `internal`, `external`) as below. CSV templates are in [`data/templates/`](data/templates/).
 
 ```
 data/
-├── raw/<dataset>/...                        original T2 / DWI / ADC NIfTI
+├── raw/<dataset>/...                        original T2 / DWI / ADC NIfTI. No intensity normalization is needed (z-scored at load). 
 ├── seg_raw/<dataset>/<case_id>.nii.gz       optional segmentation masks on the original T2 grid
 ├── prostate_raw/<dataset>/<case_id>.nii.gz  optional whole-prostate masks, used only to center the crop
 ├── csv/<dataset>.csv                        case_id, [split,] t2, dwi, adc, pirads, cspca (paths + labels)
 ├── splits/<dataset>/{train,val,test}.csv    optional, one case_id column each, instead of the split column
 └── processed/<dataset>/                     written by preprocess_data.py = model input
 ```
-- No intensity normalization is needed (z-scored at load). 
 
 ## 2. Preprocessing
 
@@ -153,6 +152,7 @@ python train.py \
     --out_dir runs/scratch --run_name pirads_resnet18_mask
 ```
 
+Cases:
 | setting | arguments |
 |---|---|
 | PI-RADS task | `--label_col pirads --classes 1,2,3,4,5 --loss coral` |
@@ -181,7 +181,7 @@ done
 ```
 -->
 
-Default setting:
+Default training setting:
 
 | | value | flags |
 |---|---|---|
@@ -291,12 +291,12 @@ runs/<...>/<run_name>/
   other arguments are taken from the run itself.
 - **Overwriting:** `train.py` refuses to write into an existing run directory unless `--overwrite` is
   given.
-<!--- **Test set:** the test split is evaluated only once, after training, with the best-validation
-  checkpoint. It is never used for model selection.-->
 - **Missing sequences:** a missing DWI or ADC is fed as an all-zero channel. Cases without T2 are
   excluded (`--require_t2 false` keeps them).
 - **Checkpoint format:** each checkpoint stores its full argument list, and the architecture is
   rebuilt from it.
+  <!--- **Test set:** the test split is evaluated only once, after training, with the best-validation
+  checkpoint. It is never used for model selection.-->
  <!-- Checkpoints from the original research code (`--ve_name 3dvit_channel` /
   `resnet18_channel` / `resnet50_channel`, `--seg_dir` / `--seg_label_values`) load in `inference.py`
   and as `--finetune_from` sources without conversion, and so do runs from earlier versions of this
@@ -359,7 +359,7 @@ python train.py "${EXT[@]}" "${FT[@]}" --finetune_from weights/pirads_resnet18_5
   differ from this repository's column names. To compute scores, give `--label_col` explicitly. The
   prediction CSV columns use the checkpoint's task name:
 
-  | models | task name in the checkpoint | classes | your column |
+  | models | task name in the checkpoint | classes | --label_col |
   |---|---|---|---|
   | `pirads_*` | `PIRAD_MAX` | 1–5 | `--label_col pirads` |
   | `cspca_*` | `significance_pirads12` | 0, 1 | `--label_col cspca` |
