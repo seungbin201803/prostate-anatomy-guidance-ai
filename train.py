@@ -1,26 +1,31 @@
 """
-Train a channel-stacked mpMRI classifier (T2/DWI/ADC [+ zone mask] -> 3D ViT / ResNet -> mean-pooled
-tokens -> CORAL or softmax head), from scratch or fine-tuned from a previous run.
+Train a channel-stacked mpMRI classifier (T2/DWI/ADC [+ segmentation mask] -> 3D ViT / ResNet ->
+mean-pooled tokens -> CORAL or softmax head), from scratch or fine-tuned from a previous run.
 
-From scratch (defaults are the recipe used for the internal dataset):
+From scratch (defaults are the recipe used for the internal dataset). Without --seg_dir the input is
+T2/DWI/ADC only; with it, the case's mask is a 4th channel, its --seg_labels spread evenly over (0, 1]
+(background 0 stays 0; e.g. 0,1,2,3,4,5 -> 0, 0.2, 0.4, 0.6, 0.8, 1.0):
 
     python train.py --data_csv data/processed/internal/dataset.csv \
-        --label_csv data/labels/internal.csv --label_col pirads --classes 1,2,3,4,5 --loss coral \
-        --model resnet18 --mask 5zone --out_dir runs/scratch --run_name pirads_resnet18_5zone
+        --label_csv data/csv/internal.csv --label_col pirads --classes 1,2,3,4,5 --loss coral \
+        --model resnet18 --seg_dir data/processed/internal/seg --seg_labels 0,1,2,3,4,5 \
+        --out_dir runs/scratch --run_name pirads_resnet18_mask
 
 Fine-tune: the backbone is initialized from another run's backbone_<--finetune_ckpt>.pt (its
-architecture, --img_size and mask channel are taken from it); the head is always new:
+architecture, --img_size and segmentation channel are taken from it: --seg_dir is required if it has
+one, and --seg_labels defaults to its labels); the head is always new:
 
-    python train.py --finetune_from runs/scratch/pirads_resnet18_5zone --mask 5zone \
+    python train.py --finetune_from runs/scratch/pirads_resnet18_mask \
+        --seg_dir data/processed/external/seg \
         --data_csv data/processed/external/dataset.csv --split_dir data/splits/external \
-        --label_csv data/labels/external.csv --label_col pirads --classes 3,4,5 --loss coral \
+        --label_csv data/csv/external.csv --label_col pirads --classes 3,4,5 --loss coral \
         --epochs 50 --lr_backbone 2e-5 --weight_decay 1e-2 --warmup_epochs 2 \
         --early_stopping_min_delta 0.01 --early_stopping_min_epochs 10 \
-        --out_dir runs/finetune_external --run_name pirads_resnet18_5zone
+        --out_dir runs/finetune/external --run_name pirads_resnet18_mask
 
 Resume an interrupted run (every other argument comes from the run; --epochs may be raised):
 
-    python train.py --resume runs/scratch/pirads_resnet18_5zone
+    python train.py --resume runs/scratch/pirads_resnet18_mask
 
 Outputs in <out_dir>/<run_name>/: log.txt, args.json, metrics.jsonl (one row per epoch),
 tensorboard/, {backbone,heads}_{max_val_score,min_val,last}.pt, train_state_last.pt,
@@ -39,10 +44,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from pagai.utils import parse_tuple, parse_str_list, str2bool, log_print, format_duration
-from pagai.data import MPMRDataset, MASK_PRESETS, compute_label_space
+from pagai.data import MPMRDataset, seg_channel_encoding, compute_label_space
 from pagai.models import MODEL_CHOICES, VIT_DEFAULTS, build_backbone
 from pagai.tasks import LOSS_CHOICES, build_heads, selection_score, format_metrics
-from pagai.checkpoint import CHECKPOINT_NAMES, model_config, save_pair, load_model
+from pagai.checkpoint import CHECKPOINT_NAMES, model_config, describe_mask, save_pair, load_model
 from pagai.engine import train_one_epoch, evaluate
 
 # Kept from the command line on --resume; everything else comes from the run being resumed.
@@ -64,10 +69,13 @@ def parse_args():
                         "e.g. 1,2,3,4,5. Rows with other values are dropped. Default: every value, sorted.")
     g.add_argument("--require_t2", type=str2bool, default=True, help="Drop cases without T2 (default true).")
     g.add_argument("--img_size", type=parse_tuple, default=(112, 112, 24), help="Volume size X,Y,Z on disk.")
-    g.add_argument("--mask", type=str, default="none", choices=["none", *MASK_PRESETS],
-                   help="Zone-mask input channel: none (3 channels), 2zone (TZ/PZ) or 5zone (PZ/CZ/TZ/AFS/urethra).")
-    g.add_argument("--mask_dir", type=str, default=None,
-                   help="Directory of {case_id}.nii.gz zone masks on the T2 grid. Default: <image_dir>/zones2 or zones5.")
+    g.add_argument("--seg_dir", type=str, default=None,
+                   help="Directory of {case_id}.nii.gz segmentation masks on the T2 grid (preprocess_data.py's seg/). "
+                        "Given: the mask is a 4th input channel and cases without one are dropped. Default: no mask.")
+    g.add_argument("--seg_labels", type=parse_tuple, default=None,
+                   help="Comma list of the mask's integer labels, e.g. 0,1,2,3,4,5. Background 0 -> 0; the others, "
+                        "in this order, -> k/K (here 0.2, 0.4, ..., 1.0). Required with --seg_dir, unless "
+                        "fine-tuning (default: the --finetune_from backbone's labels).")
 
     g = p.add_argument_group("model")
     g.add_argument("--model", type=str, default=None, choices=MODEL_CHOICES)
@@ -121,6 +129,14 @@ def setup_new_run(parser, args):
         if not getattr(args, key):
             parser.error(f"--{key} is required")
     args.image_dir = args.image_dir or os.path.dirname(os.path.abspath(args.data_csv))
+    if args.seg_labels and not args.seg_dir:
+        parser.error("--seg_labels needs --seg_dir")
+    if args.seg_dir and not os.path.isdir(args.seg_dir):
+        parser.error(f"--seg_dir {args.seg_dir} not found")
+    try:
+        encoding = seg_channel_encoding(args.seg_labels) if args.seg_labels else None
+    except ValueError as e:
+        parser.error(str(e))
 
     if args.finetune_from:
         path = os.path.join(args.finetune_from, f"backbone_{args.finetune_ckpt}.pt")
@@ -133,21 +149,26 @@ def setup_new_run(parser, args):
         args.img_size = src["img_size"]
         for key, value in src["vit_kwargs"].items():
             setattr(args, key, value)
-        preset = MASK_PRESETS.get(args.mask)
-        target = (tuple(preset["labels"]), tuple(preset["values"])) if preset else (None, None)
-        if (src["mask_labels"], src["mask_values"]) != target:
-            parser.error(f"--mask {args.mask} must match the mask channel the --finetune_from backbone was trained "
-                         f"with ({src['mask']}: labels {src['mask_labels']}, values {src['mask_values']})")
+        src_encoding = (src["mask_labels"], src["mask_values"]) if src["mask_labels"] else None
+        if src_encoding and not args.seg_dir:
+            parser.error(f"the --finetune_from backbone was trained with a {describe_mask(src)}; pass --seg_dir")
+        if args.seg_dir and not src_encoding:
+            parser.error("the --finetune_from backbone was trained without a segmentation channel; drop --seg_dir")
+        if src_encoding and encoding is None:
+            encoding = src_encoding
+        elif src_encoding and not (encoding[0] == src_encoding[0]
+                                   and all(abs(a - b) < 1e-6 for a, b in zip(encoding[1], src_encoding[1]))):
+            parser.error(f"--seg_labels {args.seg_labels} must encode the mask like the --finetune_from backbone "
+                         f"({describe_mask(src)}); omit --seg_labels to use its labels")
     elif not args.model:
         parser.error("--model is required (unless --finetune_from or --resume)")
+    elif args.seg_dir and encoding is None:
+        parser.error("--seg_dir needs --seg_labels, e.g. --seg_labels 0,1,2,3,4,5")
 
-    preset = MASK_PRESETS.get(args.mask)
-    args.mask_labels = tuple(preset["labels"]) if preset else None
-    args.mask_values = tuple(preset["values"]) if preset else None
-    if preset and not args.mask_dir:
-        args.mask_dir = os.path.join(args.image_dir, f"zones{args.mask[0]}")
-    if not preset:
-        args.mask_dir = None
+    # Saved with the run's args; checkpoint.model_config rebuilds the input channels from them.
+    args.mask_labels, args.mask_values = encoding if encoding else (None, None)
+    if encoding and not args.seg_labels:  # inherited from --finetune_from: record it in args.json too
+        args.seg_labels = (0, *encoding[0])
 
     run_dir = os.path.join(args.out_dir, args.run_name)
     if os.path.isfile(os.path.join(run_dir, "train_state_last.pt")) and not args.overwrite:
@@ -168,7 +189,7 @@ def make_dataset(args, split, classes, require_label=True):
         classes=classes,
         require_label=require_label,
         require_t2=args.require_t2,
-        mask_dir=args.mask_dir,
+        mask_dir=args.seg_dir,
         mask_labels=args.mask_labels,
         mask_values=args.mask_values,
     )
@@ -232,6 +253,8 @@ def main():
         for key, value in state["args"].items():
             if key not in RESUME_KEEP_ARGS:
                 setattr(args, key, value)
+        if not args.seg_dir and state["args"].get("mask_dir"):  # run from before --seg_dir replaced --mask_dir
+            args.seg_dir = state["args"]["mask_dir"]
         run_dir = args.resume
     else:
         run_dir = setup_new_run(parser, args)
@@ -285,7 +308,9 @@ def main():
         log_print(f"backbone initialized from {path} (epoch {ckpt['epoch']}); new {task!r} head", log_path)
 
     n_params = sum(p.numel() for p in backbone.parameters()) + sum(p.numel() for p in heads.parameters())
-    log_print(f"model {args.model}, {in_channels} input channels, {n_params / 1e6:.2f}M parameters", log_path)
+    mask_info = describe_mask({"mask_labels": args.mask_labels, "mask_values": args.mask_values})
+    log_print(f"model {args.model}, {in_channels} input channels ({mask_info}), {n_params / 1e6:.2f}M parameters",
+              log_path)
 
     optimizer = torch.optim.AdamW([
         {"params": heads.parameters(), "lr": args.lr_head, "name": "head"},

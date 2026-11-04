@@ -5,9 +5,10 @@ Checkpoints come in pairs written to a run directory:
     heads_<name>.pt     {"epoch", "heads_state_dict", "metrics", "num_classes_dict", "label_mapping_dict", "args"}
 
 <name> is max_val_score (best validation auc/qwk), min_val (lowest validation loss) or last; "args" is
-the training script's arguments, from which the architecture is rebuilt. The same layout (and its
-argument names --ve_name/--seg_dir/--seg_labels/--seg_label_values) was used by the original research
-code, so its checkpoints load here too.
+the training script's arguments, from which the architecture is rebuilt. The segmentation channel is
+read from args["mask_labels"] / args["mask_values"] (derived from --seg_labels by train.py). The same
+layout (and its argument names --ve_name/--seg_dir/--seg_labels/--seg_label_values) was used by the
+original research code, so its checkpoints load here too.
 """
 
 import os
@@ -54,9 +55,9 @@ def model_config(saved):
     if model not in MODEL_CHOICES:
         raise ValueError(f"checkpoint model {model!r} is not supported here ({MODEL_CHOICES})")
 
-    if "mask_labels" in saved:  # this repo
+    if "mask_labels" in saved:  # this repo (checked first: its args also hold seg_dir/seg_labels)
         mask_labels, mask_values = saved.get("mask_labels"), saved.get("mask_values")
-    elif saved.get("seg_dir"):  # legacy
+    elif saved.get("seg_dir"):  # original research code
         mask_labels = saved.get("seg_labels")
         mask_values = saved.get("seg_label_values") or (1.0,) * len(mask_labels)
     else:
@@ -68,13 +69,19 @@ def model_config(saved):
         "model": model,
         "img_size": tuple(saved["img_size"]),
         "vit_kwargs": {k: saved.get(k, v) for k, v in VIT_DEFAULTS.items()},
-        "mask": saved.get("mask") or ("custom" if mask_labels else "none"),
         "mask_labels": mask_labels,
         "mask_values": mask_values,
         "hidden_dim": saved.get("hidden_dim"),
         "dropout": saved.get("dropout", 0.1),
         "loss": saved.get("loss", "coral"),
     }
+
+
+def describe_mask(cfg):
+    """'no segmentation channel', or e.g. 'segmentation channel 1->0.2, 2->0.4, ...'."""
+    if not cfg["mask_labels"]:
+        return "no segmentation channel"
+    return "segmentation channel " + ", ".join(f"{l}->{v:g}" for l, v in zip(cfg["mask_labels"], cfg["mask_values"]))
 
 
 def build_backbone_from_config(cfg):

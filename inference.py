@@ -1,15 +1,15 @@
 """
 Run a trained checkpoint on any preprocessed dataset, with or without labels.
 
-    python inference.py --checkpoint runs/scratch/pirads_resnet18_5zone \
+    python inference.py --checkpoint runs/scratch/pirads_resnet18_mask \
         --data_csv data/processed/external/dataset.csv \
         --label_csv data/csv/external.csv --label_col pirads \
-        --out_dir results/pirads_resnet18_5zone__external
+        --out_dir results/pirads_resnet18_mask__external
 
 --checkpoint is a heads_*.pt file or a run directory (then heads_<--ckpt>.pt). The architecture, input
-size, mask channel and classes come from the checkpoint. A checkpoint trained with a zone mask needs the
-masks of the new data (--mask_dir, default <image_dir>/zones2 or zones5); one trained without must not
-get one.
+size, segmentation channel (its labels and their values) and classes come from the checkpoint. A
+checkpoint trained with a segmentation mask needs the masks of the new data, with the same labels
+(--seg_dir, default <image_dir>/seg); one trained without ignores them.
 
 Labels are optional: every case gets a prediction; cases whose label is one of the checkpoint's classes
 are also scored (other label values count as unlabeled). --label_col defaults to the checkpoint's task
@@ -37,7 +37,7 @@ from sklearn.metrics import confusion_matrix
 
 from pagai.utils import parse_str_list, str2bool, log_print
 from pagai.data import MPMRDataset
-from pagai.checkpoint import CHECKPOINT_NAMES, resolve_heads_path, load_model
+from pagai.checkpoint import CHECKPOINT_NAMES, resolve_heads_path, load_model, describe_mask
 from pagai.engine import evaluate
 from pagai.tasks import format_metrics
 
@@ -76,7 +76,9 @@ def main():
     p.add_argument("--split_dir", default=None)
     p.add_argument("--label_csv", default=None)
     p.add_argument("--label_col", default=None, help="Default: the checkpoint's task name.")
-    p.add_argument("--mask_dir", default=None)
+    p.add_argument("--seg_dir", default=None,
+                   help="{case_id}.nii.gz segmentation masks on the T2 grid, for a checkpoint trained with them. "
+                        "Default: <image_dir>/seg.")
     p.add_argument("--require_t2", type=str2bool, default=True)
     p.add_argument("--out_dir", required=True)
     p.add_argument("--batch_size", type=int, default=4)
@@ -94,13 +96,13 @@ def main():
     heads.to(device)
     task, classes = info["task"], info["classes"]
 
-    if info["mask_labels"] and not args.mask_dir:
-        default = os.path.join(args.image_dir, f"zones{len(info['mask_labels'])}")
-        if not os.path.isdir(default):
-            p.error(f"the checkpoint uses a {info['mask']} zone-mask channel; pass --mask_dir ({default} not found)")
-        args.mask_dir = default
-    if args.mask_dir and not info["mask_labels"]:
-        p.error("--mask_dir given, but the checkpoint was trained without a zone mask")
+    if info["mask_labels"]:
+        args.seg_dir = args.seg_dir or os.path.join(args.image_dir, "seg")
+        if not os.path.isdir(args.seg_dir):
+            p.error(f"the checkpoint uses a {describe_mask(info)}; pass --seg_dir ({args.seg_dir} not found)")
+    elif args.seg_dir:
+        print("the checkpoint was trained without a segmentation channel: ignoring --seg_dir", flush=True)
+        args.seg_dir = None
     label_col = args.label_col or task if args.label_csv else None
     if label_col and label_col not in pd.read_csv(args.label_csv, nrows=0).columns:
         if args.label_col:
@@ -111,7 +113,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     log_path = os.path.join(args.out_dir, "inference_log.txt")
     log_print("\n".join(f"--{k} {v}" for k, v in vars(args).items()), log_path, mode="w")
-    log_print(f"model {info['model']} (mask {info['mask']}), task {task!r} classes {classes}, loss {info['loss']}, "
+    log_print(f"model {info['model']} ({describe_mask(info)}), task {task!r} classes {classes}, loss {info['loss']}, "
               f"epoch {info['epoch']}\n  {info['heads_path']}\n  {info['backbone_path']}", log_path)
 
     scores = {}
@@ -127,7 +129,7 @@ def main():
             classes=classes,
             require_label=False,
             require_t2=args.require_t2,
-            mask_dir=args.mask_dir,
+            mask_dir=args.seg_dir,
             mask_labels=info["mask_labels"],
             mask_values=info["mask_values"],
         )

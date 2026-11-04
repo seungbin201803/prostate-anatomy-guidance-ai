@@ -1,22 +1,22 @@
 # Data organization
 
 No data is distributed with this repository. Put your own data here following the layout below; the
-scripts in `scripts/` assume it (override the root with `DATA_ROOT=...`). `<dataset>` is a short name
+example commands in the main README assume it (every path is an argument, so any other layout works
+too). `<dataset>` is a short name
 per cohort, e.g. `internal` (used for training from scratch) and `external` (the external cohort for
 fine-tuning / testing).
 
 ```
 data/
 ├── raw/<dataset>/...                        original NIfTI volumes, any sub-layout
-├── zones_raw/<dataset>/<case_id>.nii.gz     5-zone prostate masks on the original T2 grid   (you provide)
-├── prostate_raw/<dataset>/<case_id>.nii.gz  optional whole-prostate masks for the crop center (you provide)
-├── csv/<dataset>.csv                        one row per case: raw volume paths + labels       (you provide)
-├── splits/<dataset>/{train,val,test}.csv    optional; one case_id column each                 (you provide)
+├── seg_raw/<dataset>/<case_id>.nii.gz       optional segmentation masks on the original T2 grid (you provide)
+├── prostate_raw/<dataset>/<case_id>.nii.gz  optional whole-prostate masks for the crop center   (you provide)
+├── csv/<dataset>.csv                        one row per case: raw volume paths + labels         (you provide)
+├── splits/<dataset>/{train,val,test}.csv    optional; one case_id column each                   (you provide)
 └── processed/<dataset>/                     written by preprocess_data.py = model input
     ├── dataset.csv
     ├── images/<case_id>/{t2,dwi,adc}.nii.gz
-    ├── zones5/<case_id>.nii.gz
-    ├── zones2/<case_id>.nii.gz
+    ├── seg/<case_id>.nii.gz                 with --seg_dir
     └── qc/<case_id>.png                     with --save_fig
 ```
 
@@ -24,7 +24,7 @@ Templates of every CSV are in [`templates/`](templates/), in the same layout (`t
 
 ## Rules
 
-**Case IDs.** `case_id` is a unique string per MRI exam. It names the zone-mask file
+**Case IDs.** `case_id` is a unique string per MRI exam. It names the mask files
 (`<case_id>.nii.gz`) and joins the case CSV, masks and splits, so it must be identical in all of them.
 Avoid `/` and spaces.
 
@@ -43,31 +43,29 @@ orientation convention across every dataset you train, fine-tune and run inferen
 figures. In our experiments one external cohort needed an axis flip to match the internal data;
 `preprocess_data.py --orientation LPS` reorients everything to a common convention.
 
-**Zone masks.** These are assumed to exist already; this repository does not segment the prostate. Use
-one 3D NIfTI per case, `zones_raw/<dataset>/<case_id>.nii.gz`, **on the same voxel grid as that case's
-raw T2** (same size, spacing, origin and direction), with integer labels:
+**Segmentation masks (optional).** These are the optional 4th input channel, for models trained with
+a mask. You provide them: this repository neither distributes masks nor creates them. Use one 3D NIfTI
+per case, `seg_raw/<dataset>/<case_id>.nii.gz`, **on the same voxel grid as that case's raw T2** (same
+size, spacing, origin and direction), with integer labels: 0 for background, and any labels you like
+for the structures (e.g. prostate zones). Pass `--seg_dir data/seg_raw/<dataset>` to
+`preprocess_data.py`, which writes them to `processed/<dataset>/seg/` with the labels unchanged.
 
-| label | zone |
-|---|---|
-| 0 | background |
-| 1 | peripheral zone (PZ) |
-| 2 | central zone (CZ) |
-| 3 | transition zone (TZ) |
-| 4 | anterior fibromuscular stroma (AFS) |
-| 5 | urethra |
+You list the labels when training (`train.py --seg_labels 0,1,2,3,4,5`). The channel then holds
+background 0 as 0, and spreads the other labels, in the order given, evenly over (0, 1]
+(`1,2,3,4,5` → 0.2, 0.4, 0.6, 0.8, 1.0; `0,1,2` → 0, 0.5, 1.0). A mask containing a label that is
+not in the list is an error. Use the same labels for every dataset a model is fine-tuned or run on.
+The label list is stored in the checkpoint, so fine-tuning and inference only need the mask directory.
+Models trained without a mask need no masks at all. With `--seg_dir`, cases without a mask are
+dropped.
 
-The zone mask is the optional 4th input channel, so every case needs one. Unless prostate masks are
-given (below), its centroid is also the crop center, so it is needed even for models trained without
-the mask channel. `preprocess_data.py` derives the 2-zone mask (1 = TZ, i.e. TZ+CZ+AFS+urethra; 2 = PZ) from it. If you only have 2-zone
-masks, put them in `zones_raw/` with labels 1 = PZ and 3 = TZ (any 5-zone subset works). Only the
-`2zone` and no-mask models are then meaningful.
-
-**Prostate masks (optional).** If the crop should be centered on a different mask than the zone mask
-(in our experiments, the prostate label of a separate segmentation), put one 3D NIfTI per case in
+**Prostate masks (optional).** The crop is centered on a prostate mask when there is one, and on the
+segmentation mask otherwise. At least one of the two is needed per case. For a dedicated crop-center
+mask (in our experiments, the prostate label of a separate segmentation), put one 3D NIfTI per case in
 `prostate_raw/<dataset>/<case_id>.nii.gz` and pass `--prostate_dir` (plus `--prostate_label N` if the
 file holds several labels; default: every nonzero voxel). It may be on any voxel grid in the same
 physical space as the T2. It only sets the crop center and is never a model input. Cases without one
-fall back to the zone-mask centroid, and `dataset.csv` records which was used (`center_source`).
+fall back to the segmentation-mask centroid, and `dataset.csv` records which was used
+(`center_source`: `prostate` or `seg`).
 
 **Case CSV** (`csv/<dataset>.csv`): one row per exam with `case_id`, `t2`, `dwi`, `adc`, optionally
 `split`, and the label columns. Image paths are relative to `raw/<dataset>/` (or absolute).
@@ -96,7 +94,7 @@ inference needs no split (`inference.py --splits all`).
 
 - `images/<case_id>/{t2,dwi,adc}.nii.gz`: resampled to 1 x 1 x 3 mm and cropped to 112 x 112 x 24
   voxels around the prostate centroid (zero padding where the crop leaves the image).
-- `zones5/`, `zones2/`: masks on exactly the cropped T2 grid.
+- `seg/`: segmentation masks on exactly the cropped T2 grid (only needed for models with a mask).
 - `dataset.csv`: `case_id, [split,] t2_path, dwi_path, adc_path` (relative to `processed/<dataset>/`;
   blank = missing). `center_source`, `center_{x,y,z}_mm` and `note` are informational. Rows whose
   `note` is not `ok` have blank paths and are skipped.

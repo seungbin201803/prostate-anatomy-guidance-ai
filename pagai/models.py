@@ -1,6 +1,6 @@
 """
-Channel-stacked 3D vision encoders. The input [B, C, X, Y, Z] (C = 3: T2/DWI/ADC, or 4 with the zone
-mask) goes through one trunk; forward() returns its token sequence [B, N, embed_dim], which the
+Channel-stacked 3D vision encoders. The input [B, C, X, Y, Z] (C = 3: T2/DWI/ADC, or 4 with the
+segmentation mask) goes through one trunk; forward() returns its token sequence [B, N, embed_dim], which the
 classifier mean-pools.
 
     vit       MONAI 3D ViT (conv patch embedding, learnable position embedding, no cls token)

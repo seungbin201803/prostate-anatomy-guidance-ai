@@ -1,13 +1,13 @@
 """
-Dataset for the channel-stacked classifier: per case, T2/DWI/ADC (and optionally a zone mask) on a
-common grid (img_size, 1x1x3 mm in our experiments, written by preprocess_data.py) are
+Dataset for the channel-stacked classifier: per case, T2/DWI/ADC (and optionally a segmentation mask)
+on a common grid (img_size, 1x1x3 mm in our experiments, written by preprocess_data.py) are
 z-scored and stacked as channels -> [3 or 4, X, Y, Z]. No augmentation.
 
 Data CSV (--data_csv, see data/README.md):
     case_id, t2_path, dwi_path, adc_path   paths relative to --image_dir; a blank DWI/ADC cell (or a
                                            missing file) becomes an all-zero channel
     split                                  only when no --split_dir is given
-Zone masks (--mask_dir): {case_id}.nii.gz on the case's T2 grid.
+Segmentation masks (--seg_dir): {case_id}.nii.gz on the case's T2 grid, integer labels (--seg_labels).
 Labels (--label_csv): case_id plus one column per task.
 """
 
@@ -23,11 +23,24 @@ from .utils import ID_COL, read_table, log_print, whitelist_str
 
 MODALITIES = ("t2", "dwi", "adc")
 
-# Label -> channel value of the zone-mask channel. Every zone is nonzero so it differs from background.
-MASK_PRESETS = {
-    "2zone": {"labels": (1, 2), "values": (0.5, 1.0)},  # 1 TZ (TZ+CZ+AFS+urethra), 2 PZ
-    "5zone": {"labels": (1, 2, 3, 4, 5), "values": (0.2, 0.4, 0.6, 0.8, 1.0)},  # PZ, CZ, TZ, AFS, urethra
-}
+def seg_channel_encoding(seg_labels):
+    """
+    --seg_labels (e.g. 0,1,2,3,4,5) -> (labels, values) of the segmentation channel. Background 0 is
+    always 0 (listing it is optional). The other labels, in the order given, are spread evenly over
+    (0, 1]: the k-th of K becomes k/K, so every label is nonzero and differs from background.
+        0,1,2,3,4,5 -> labels (1, 2, 3, 4, 5), values (0.2, 0.4, 0.6, 0.8, 1.0)
+        0,1,2       -> labels (1, 2), values (0.5, 1.0)
+    """
+    labels = [int(v) for v in seg_labels]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"--seg_labels {tuple(labels)} has duplicates")
+    if any(v < 0 for v in labels):
+        raise ValueError(f"--seg_labels {tuple(labels)} must be non-negative integers")
+    foreground = [v for v in labels if v != 0]
+    if not foreground:
+        raise ValueError("--seg_labels needs at least one label other than background 0")
+    k = len(foreground)
+    return tuple(foreground), tuple(i / k for i in range(1, k + 1))
 
 
 # ============================================================
@@ -75,7 +88,7 @@ def load_volume(path, expected_shape):
 
 def load_mask_on_grid(mask_path, ref_path, labels, values):
     """
-    Zone mask already on ref_path's (the T2's) voxel grid -> [1, X, Y, Z] float tensor with label
+    Segmentation mask already on ref_path's (the T2's) voxel grid -> [1, X, Y, Z] float tensor with label
     labels[i] set to values[i] and everything else 0. Raises ValueError if the mask is not on that grid
     or contains a nonzero label outside `labels`.
     """
@@ -98,7 +111,7 @@ def load_mask_on_grid(mask_path, ref_path, labels, values):
     arr = sitk.GetArrayFromImage(mask)  # [Z, Y, X]
     unexpected = sorted(set(np.unique(arr).tolist()) - {0} - set(labels))
     if unexpected:
-        raise ValueError(f"mask {mask_path} has labels {unexpected} outside {tuple(labels)}")
+        raise ValueError(f"mask {mask_path} has labels {unexpected} outside --seg_labels {(0, *labels)}")
 
     out = np.zeros(arr.shape, dtype=np.float32)
     for label, value in zip(labels, values):
@@ -147,13 +160,13 @@ def compute_label_space(label_csv, label_col, classes=None):
 class MPMRDataset(Dataset):
     """
     One split of --data_csv, joined with an optional label column. Items:
-        image       [3 or 4, X, Y, Z] float, channels T2, DWI, ADC (, zone mask)
+        image       [3 or 4, X, Y, Z] float, channels T2, DWI, ADC (, segmentation mask)
         label       class index, -1 if unlabeled
         label_raw   raw label as a string ('' if none)
         case_id
     Rows are excluded, in this order (each step is counted and logged):
         1. require_t2: no T2 (blank path or no file)
-        2. mask_dir: no {case_id}.nii.gz zone mask
+        2. mask_dir: no {case_id}.nii.gz segmentation mask
         3. require_label: no label, or a label outside `classes`
     split: 'train'/'val'/'test' (rows of split_csv's case_ids if given, else of the `split` column),
     or 'all' (every row).
@@ -217,7 +230,7 @@ class MPMRDataset(Dataset):
             df = self._exclude(df, df["_t2_file"].isna(), "no T2 image")
         if mask_dir:
             has_mask = df[ID_COL].map(lambda c: os.path.isfile(os.path.join(mask_dir, f"{c}.nii.gz")))
-            df = self._exclude(df, ~has_mask, f"no zone mask in {mask_dir}")
+            df = self._exclude(df, ~has_mask, f"no segmentation mask in {mask_dir}")
         if require_label:
             df = self._exclude(df, df["_label"] < 0, f"no {label_col!r} label in {classes}")
         self.df = df.reset_index(drop=True)

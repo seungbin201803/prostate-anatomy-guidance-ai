@@ -1,19 +1,20 @@
 """
-Raw mpMRI + 5-zone masks -> model input: each modality resampled to --spacing and cropped/zero-padded
-to --size around the prostate centroid, the zone mask resampled onto the cropped T2 grid, and a
-2-zone mask derived from it.
+Raw mpMRI [+ segmentation masks] -> model input: each modality resampled to --spacing and cropped/
+zero-padded to --size around the prostate centroid, and the segmentation mask (if any) resampled onto
+the cropped T2 grid with its labels unchanged.
 
 Per case (--csv row):
   1. crop center = centroid, as a physical point, of
        - the prostate mask {--prostate_dir}/{case_id}.nii.gz (voxels == --prostate_label, or every
          nonzero voxel), when --prostate_dir is given; it may be on any grid in the same physical space;
-       - otherwise (or when that case has no prostate mask) the nonzero voxels of the zone mask
-         {--zone_dir}/{case_id}.nii.gz (5 zones on the raw T2 grid: 1 PZ, 2 CZ, 3 TZ, 4 AFS, 5 urethra);
-     dataset.csv records which one was used (center_source);
+       - otherwise (or when that case has no prostate mask) the nonzero voxels of the segmentation mask
+         {--seg_dir}/{case_id}.nii.gz (integer labels on the raw T2 grid);
+     at least one of --prostate_dir / --seg_dir is needed; dataset.csv records which was used
+     (center_source);
   2. T2, DWI, ADC: B-spline resampling to --spacing (origin and direction kept), then a --size
      crop centered on that point (zero padding where the crop leaves the image);
-  3. zone mask: nearest-neighbor resampling onto the cropped T2 grid -> zones5/; then
-     1 = TZ (TZ+CZ+AFS+urethra), 2 = PZ -> zones2/.
+  3. segmentation mask: nearest-neighbor resampling onto the cropped T2 grid -> seg/. Labels are kept
+     as they are; train.py --seg_labels maps them to channel values.
 Volumes are not reoriented (--orientation to change that): keep one convention across every dataset
 you train, fine-tune and run inference on, and check the --save_fig QC figures.
 
@@ -21,12 +22,11 @@ Input  --csv: case_id, t2, dwi, adc [, split, labels]  (paths relative to --raw_
 Output --out_dir/
     dataset.csv                         case_id[, split], t2_path, dwi_path, adc_path, center_source, center_*_mm, note
     images/<case_id>/{t2,dwi,adc}.nii.gz
-    zones5/<case_id>.nii.gz             1 PZ, 2 CZ, 3 TZ, 4 AFS, 5 urethra
-    zones2/<case_id>.nii.gz             1 TZ, 2 PZ
+    seg/<case_id>.nii.gz                with --seg_dir, for cases that have a mask
     qc/<case_id>.png                    with --save_fig
 
     python preprocess_data.py --csv data/csv/internal.csv --raw_dir data/raw/internal \
-        --zone_dir data/zones_raw/internal [--prostate_dir data/prostate_raw/internal] \
+        [--seg_dir data/seg_raw/internal] [--prostate_dir data/prostate_raw/internal] \
         --out_dir data/processed/internal --num_workers 8
 """
 
@@ -43,14 +43,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pagai.utils import ID_COL, read_table, parse_tuple, parse_float_tuple  # noqa: E402
 
 MODALITIES = ("t2", "dwi", "adc")
-
-
-def to_2zones(zone):
-    """5-zone labels (1 PZ, 2 CZ, 3 TZ, 4 AFS, 5 urethra) -> 1 = TZ (TZ+CZ+AFS+urethra), 2 = PZ."""
-    out = np.zeros(zone.shape, dtype=np.uint8)
-    out[np.isin(zone, (2, 3, 4, 5))] = 1
-    out[zone == 1] = 2
-    return out
 
 
 def read_image(path, orientation):
@@ -102,26 +94,31 @@ def mask_center(path, label, orientation):
     return mask.TransformIndexToPhysicalPoint([int(round(c)) for c in voxels.mean(axis=0)[::-1]])
 
 
-def save_qc_figure(t2, zones, path, case_id):
+def save_qc_figure(t2, seg, path, case_id):
+    """Cropped T2 slices, with the segmentation's label contours when there is one."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     img = sitk.GetArrayFromImage(t2)  # [Z, Y, X]
-    seg = sitk.GetArrayFromImage(zones)
-    zs = np.where(seg.any(axis=(1, 2)))[0]
-    zs = np.unique(np.linspace(zs[0], zs[-1], 5).round().astype(int)) if len(zs) else [img.shape[0] // 2]
+    arr = sitk.GetArrayFromImage(seg) if seg is not None else np.zeros(img.shape, dtype=np.uint8)
+    labels = [int(v) for v in np.unique(arr) if v != 0]
+    zs = np.where(arr.any(axis=(1, 2)))[0]
+    zs = np.unique(np.linspace(zs[0], zs[-1], 5).round().astype(int)) if len(zs) \
+        else np.unique(np.linspace(0, img.shape[0] - 1, 7).round().astype(int))[1:-1]
     fig, axes = plt.subplots(1, len(zs), figsize=(3 * len(zs), 3.3), squeeze=False)
-    colors = {1: "red", 2: "yellow", 3: "blue", 4: "lime", 5: "magenta"}
+    colors = ["red", "yellow", "blue", "lime", "magenta", "cyan", "orange", "white", "pink", "brown"]
     vmin, vmax = np.percentile(img, [1, 99])
     for ax, z in zip(axes[0], zs):
         ax.imshow(img[z], cmap="gray", vmin=vmin, vmax=vmax)
-        for label, color in colors.items():
-            if (seg[z] == label).any():
-                ax.contour(seg[z] == label, levels=[0.5], colors=[color], linewidths=0.8)
+        for i, label in enumerate(labels):
+            if (arr[z] == label).any():
+                ax.contour(arr[z] == label, levels=[0.5], colors=[colors[i % len(colors)]], linewidths=0.8)
         ax.set_title(f"z={z}", fontsize=8)
         ax.axis("off")
-    fig.suptitle(f"{case_id}  (PZ red, CZ yellow, TZ blue, AFS green, urethra magenta)", fontsize=8)
+    legend = ", ".join(f"{label} {colors[i % len(colors)]}" for i, label in enumerate(labels)) \
+        if labels else "no segmentation"
+    fig.suptitle(f"{case_id}  (labels: {legend})", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=100)
     plt.close(fig)
@@ -134,19 +131,22 @@ def process_case(job):
     if "split" in case:
         row["split"] = case["split"]
     try:
-        zone_path = os.path.join(args.zone_dir, f"{case_id}.nii.gz")
-        if not os.path.isfile(zone_path):
-            raise RuntimeError("no zone mask")
-        zone = read_image(zone_path, args.orientation)
+        seg_path = os.path.join(args.seg_dir, f"{case_id}.nii.gz") if args.seg_dir else None
+        if seg_path and not os.path.isfile(seg_path):
+            seg_path = None
         prostate_path = os.path.join(args.prostate_dir, f"{case_id}.nii.gz") if args.prostate_dir else None
         if prostate_path and os.path.isfile(prostate_path):
             center_phys = mask_center(prostate_path, args.prostate_label, args.orientation)
             row["center_source"] = "prostate"
-        else:
+        elif seg_path:
             if prostate_path:
-                print(f"[{case_id}] no prostate mask, cropping at the zone-mask centroid", flush=True)
-            center_phys = mask_center(zone_path, None, args.orientation)
-            row["center_source"] = "zone"
+                print(f"[{case_id}] no prostate mask, cropping at the segmentation-mask centroid", flush=True)
+            center_phys = mask_center(seg_path, None, args.orientation)
+            row["center_source"] = "seg"
+        else:
+            raise RuntimeError("no prostate or segmentation mask to center the crop on")
+        if args.seg_dir and not seg_path:
+            print(f"[{case_id}] no segmentation mask: images only (excluded from runs with --seg_dir)", flush=True)
         row.update({f"center_{a}_mm": round(float(v), 2) for a, v in zip("xyz", center_phys)})
 
         cropped = {}
@@ -165,13 +165,13 @@ def process_case(job):
             row[f"{m}_path"] = out_rel
             cropped[m] = out
 
-        zones5 = sitk.Resample(zone, cropped["t2"], sitk.Transform(), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
-        zones2 = sitk.GetImageFromArray(to_2zones(sitk.GetArrayFromImage(zones5)))
-        zones2.CopyInformation(zones5)
-        sitk.WriteImage(zones5, os.path.join(args.out_dir, "zones5", f"{case_id}.nii.gz"), useCompression=True)
-        sitk.WriteImage(zones2, os.path.join(args.out_dir, "zones2", f"{case_id}.nii.gz"), useCompression=True)
+        seg = None
+        if seg_path:
+            seg = sitk.Resample(read_image(seg_path, args.orientation), cropped["t2"], sitk.Transform(),
+                                sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+            sitk.WriteImage(seg, os.path.join(args.out_dir, "seg", f"{case_id}.nii.gz"), useCompression=True)
         if args.save_fig:
-            save_qc_figure(cropped["t2"], zones5, os.path.join(args.out_dir, "qc", f"{case_id}.png"), case_id)
+            save_qc_figure(cropped["t2"], seg, os.path.join(args.out_dir, "qc", f"{case_id}.png"), case_id)
         row["note"] = "ok"
     except Exception as e:  # one broken case shouldn't stop the dataset; blank paths keep it out of training
         row.update({f"{m}_path": "" for m in MODALITIES})
@@ -184,10 +184,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--csv", required=True, help="Case CSV: case_id, t2, dwi, adc [, split, label columns].")
     p.add_argument("--raw_dir", default="", help="Root of the --csv image paths.")
-    p.add_argument("--zone_dir", required=True, help="{case_id}.nii.gz 5-zone masks on the raw T2 grid.")
+    p.add_argument("--seg_dir", default=None,
+                   help="Optional {case_id}.nii.gz segmentation masks (integer labels) on the raw T2 grid, "
+                        "resampled to <out_dir>/seg/ for training with a mask channel.")
     p.add_argument("--prostate_dir", default=None,
                    help="Optional {case_id}.nii.gz prostate masks whose centroid is the crop center. "
-                        "Default (and for cases without one): the zone-mask centroid.")
+                        "Default (and for cases without one): the segmentation-mask centroid.")
     p.add_argument("--prostate_label", type=int, default=None,
                    help="Prostate label in the --prostate_dir masks (e.g. 17 for a TotalSegmentator-MRI "
                         "multi-organ mask). Default: every nonzero voxel.")
@@ -195,15 +197,18 @@ def main():
     p.add_argument("--spacing", type=parse_float_tuple, default=(1.0, 1.0, 3.0), help="Target spacing X,Y,Z in mm.")
     p.add_argument("--size", type=parse_tuple, default=(112, 112, 24), help="Crop size X,Y,Z in voxels (= --img_size).")
     p.add_argument("--orientation", default="", help="Reorient every volume first, e.g. LPS. Default: keep as is.")
-    p.add_argument("--save_fig", action="store_true", help="Write QC figures (cropped T2 + zone contours).")
+    p.add_argument("--save_fig", action="store_true", help="Write QC figures (cropped T2 + segmentation contours).")
     p.add_argument("--num_workers", type=int, default=4)
     args = p.parse_args()
+    if not args.seg_dir and not args.prostate_dir:
+        p.error("give --prostate_dir and/or --seg_dir: the crop is centered on one of them")
 
     cases = read_table(args.csv, required=["t2"])
     for m in ("dwi", "adc"):
         if m not in cases.columns:
             cases[m] = ""
-    for sub in ("images", "zones5", "zones2") + (("qc",) if args.save_fig else ()):
+    subdirs = ("images",) + (("seg",) if args.seg_dir else ()) + (("qc",) if args.save_fig else ())
+    for sub in subdirs:
         os.makedirs(os.path.join(args.out_dir, sub), exist_ok=True)
 
     jobs = [(case, args) for case in cases.to_dict("records")]
@@ -221,7 +226,11 @@ def main():
     df.to_csv(os.path.join(args.out_dir, "dataset.csv"), index=False)
     n_ok = int((df["note"] == "ok").sum())
     print(f"{n_ok}/{len(df)} cases ok -> {os.path.join(args.out_dir, 'dataset.csv')}")
-    if args.prostate_dir:
+    if args.seg_dir:
+        n_seg = sum(os.path.isfile(os.path.join(args.out_dir, "seg", f"{c}.nii.gz"))
+                    for c in df.loc[df["note"] == "ok", ID_COL])
+        print(f"{n_seg}/{n_ok} ok cases have a segmentation mask")
+    if "center_source" in df.columns:
         print(f"crop center from: {df['center_source'].value_counts().to_dict()}")
 
 
