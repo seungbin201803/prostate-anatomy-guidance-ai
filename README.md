@@ -11,12 +11,14 @@ The pipeline:
 - predicts **PI-RADS** (ordinal classification, CORAL loss) or **clinically significant prostate cancer** (csPCa; binary classification, cross-entropy loss) per exam.
 - offers three backbones: 3D **ViT**, 3D **ResNet-18**, 3D **ResNet-50**.
 
+<!--
 ```
 T2   ┐
 DWI  ├─ resample 1×1×3 mm, crop 112×112×24 at the prostate ─▶ channel stack ─▶ ViT / ResNet ─▶ mean-pool ─▶ head ─▶ PI-RADS / csPCa
 ADC  ┤
 seg  ┘  (optional: no mask | mask)
 ```
+-->
 
 The data used in our experiments is not public. This repository contains code only, and
 [`data/README.md`](data/README.md) explains how to organize your own data. Trained model weights are
@@ -202,7 +204,7 @@ The from-scratch recipe (the defaults; written out, these are the flags):
 | precision | bf16 autocast on CUDA | `--precision bf16` |
 
 **Mask channel values.** Background 0 stays 0, and the other `--seg_labels`, in the order given, become
-k/K: `0,1,2,3,4,5` → 0.2/0.4/0.6/0.8/1.0, and `0,1,2` → 0.5/1.0. Every label is nonzero, so it is
+k/K: `1,2,3,4,5` → 0.2/0.4/0.6/0.8/1.0, and `1,2` → 0.5/1.0. Every label is nonzero, so it is
 distinguishable from background. A mask containing a label that is not in `--seg_labels` is an error,
 and with `--seg_dir`, cases without a mask are dropped.
 
