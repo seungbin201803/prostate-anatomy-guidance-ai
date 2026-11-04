@@ -1,5 +1,5 @@
 """
-Writes a small synthetic dataset in the raw layout of data/README.md, to check the pipeline end to end
+Writes a small synthetic dataset in the raw data layout of README.md (section 1. Data), to check the pipeline end to end
 (preprocess_data.py -> train.py -> inference.py) without real data. Images are random
 ellipsoids, so any trained model is meaningless.
 

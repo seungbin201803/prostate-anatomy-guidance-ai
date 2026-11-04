@@ -3,7 +3,8 @@
 Code for training, fine-tuning and running 3D deep-learning classifiers of prostate multiparametric MRI
 (mpMRI), with or without **prostate zonal segmentation masks** as an anatomical guidance. 
 
-- The data used in our experiments is not public - [`data/README.md`](data/README.md) explains how to organize your own data. 
+- The data used in our experiments is not public.
+<!--- [Data](#1-data) explains how to organize your own data.-->
 - Trained model weights: [Pretrained weights](#pretrained-weights).
 
 The pipeline:
@@ -59,11 +60,9 @@ pip install -r requirements.txt
 ```
 
 ## Synthetic data (testing without real data)
-
-The real data is not public, but a small synthetic dataset in the same layout can be generated to check
-the whole pipeline. The images are random ellipsoids with a "prostate", a 5-label zone segmentation mask, and labels.
+A small synthetic dataset in the same layout can be generated to check the whole pipeline. 
+The images are random ellipsoids with a "prostate", a 5-label zone segmentation mask, and labels.
 About 10% of cases have no ADC, and every 4th case has no prostate mask, so it falls back to the segmentation mask for the crop center.
-
 
 This runs every step below on synthetic data with 1-epoch ResNet-18 runs:
 <!--It takes about 10 minutes on a CPU,
@@ -75,7 +74,7 @@ bash tools/smoke_test.sh
 
 | folder | contents |
 |---|---|
-| `data_synthetic/` | `internal` (20 cases) and `external` (15 cases), in the [`data/`](data/README.md) layout: `raw/`, `seg_raw/`, `prostate_raw/`, `csv/` (with labels), `splits/`, and `processed/` |
+| `data_synthetic/` | `internal` (20 cases) and `external` (15 cases), in the [`data/`](#1-data) layout: `raw/`, `seg_raw/`, `prostate_raw/`, `csv/` (with labels), `splits/`, and `processed/` |
 | `runs_synthetic/scratch/` | from-scratch runs on `internal`, both tasks × no mask / mask |
 | `runs_synthetic/finetune/external/` | the three fine-tuning variants on `external`, both tasks |
 | `results_synthetic/external/` | predictions and scores of every fine-tuned run |
@@ -91,24 +90,22 @@ for name in internal external; do
       --prostate_label 17 --out_dir data_synthetic/processed/$name --save_fig
 done
 ```
-The commands below then work on it with `data/` replaced by `data_synthetic/`. 
+<!--The commands below then work on it with `data/` replaced by `data_synthetic/`. -->
 
 ## 1. Data
 
-Organize each cohort as described in [`data/README.md`](data/README.md):
+Organize each cohort (`<dataset>`, e.g. `internal`, `external`) as below. CSV templates are in [`data/templates/`](data/templates/).
 
 ```
-data/raw/<dataset>/...                       original T2 / DWI / ADC NIfTI
-data/seg_raw/<dataset>/<case_id>.nii.gz      optional segmentation masks on the original T2 grid 
-data/prostate_raw/<dataset>/<case_id>.nii.gz optional whole-prostate masks, used only to center the crop
-data/csv/<dataset>.csv                       case_id, split, t2, dwi, adc, pirads, cspca (paths + labels)
-data/splits/<dataset>/{train,val,test}.csv   optional, instead of the split column
+data/
+├── raw/<dataset>/...                        original T2 / DWI / ADC NIfTI
+├── seg_raw/<dataset>/<case_id>.nii.gz       optional segmentation masks on the original T2 grid
+├── prostate_raw/<dataset>/<case_id>.nii.gz  optional whole-prostate masks, used only to center the crop
+├── csv/<dataset>.csv                        case_id, [split,] t2, dwi, adc, pirads, cspca (paths + labels)
+├── splits/<dataset>/{train,val,test}.csv    optional, one case_id column each, instead of the split column
+└── processed/<dataset>/                     written by preprocess_data.py = model input
 ```
-
-<!--**Segmentation masks are not distributed.** They are only needed for models trained with a mask
-channel, and you create them yourself, with any integer labels. The crop is centered on the centroid of
-a prostate mask when you provide one (`--prostate_dir`), and on the segmentation-mask centroid otherwise,
-so every case needs at least one of the two.-->
+- No intensity normalization is needed (z-scored at load). 
 
 ## 2. Preprocessing
 
@@ -126,13 +123,12 @@ python preprocess_data.py \
    mask when no prostate mask is given or a case has none. `dataset.csv` records which
    (`center_source`).
 2. B-spline resamples T2, DWI and ADC to 1 × 1 × 3 mm.
-3. crops (or zero-pads) each sequence to 112 × 112 × 24 voxels around that centroid.
+3. crops (with zero-pads when needed) each sequence to 112 × 112 × 24 voxels around that centroid.
 4. resamples the segmentation mask onto the cropped T2 grid (`seg/`), nearest neighbor, keeping its
    labels.
 5. writes `dataset.csv`, which the training and inference scripts read, and optional QC figures
    (`qc/`).
 
-Run it once per cohort (`internal`, `external`), and look through the QC figures.
 
 ## 3. Training from scratch
 
@@ -156,8 +152,6 @@ python train.py \
     --model resnet18 --seg_dir data/processed/internal/seg --seg_labels 0,1,2,3,4,5 \
     --out_dir runs/scratch --run_name pirads_resnet18_mask
 ```
-
-Each run is written to `--out_dir/--run_name`. Choose the task, model and mask with:
 
 | setting | arguments |
 |---|---|
@@ -187,7 +181,7 @@ done
 ```
 -->
 
-The from-scratch recipe (the defaults):
+Default setting:
 
 | | value | flags |
 |---|---|---|
@@ -215,9 +209,8 @@ and with `--seg_dir`, cases without a mask are dropped.-->
 max_val_score`). The architecture, input size and mask channel come from that checkpoint, so
 `--model` and `--seg_labels` are not needed:
 
-- **mask:** a source trained with a mask needs `--seg_dir`, and reuses its labels, so the external
-  masks must have the same labels;
-- **no mask:** a source trained without one must not get `--seg_dir`;
+- **mask:** a source trained with a mask needs `--seg_dir`, and reuses its labels, so the new data masks must have the same labels.
+- **no mask:** a source trained without one must not get `--seg_dir`.
 - **head:** the classification head is always newly initialized, because the label space can differ. (e.g., An external cohort might use PI-RADS 3–5).
 
 <!--
@@ -266,9 +259,8 @@ done
   checkpoint's classes are reported as unlabeled. `--label_col` defaults to the checkpoint's task
   name.-->
 - **Splits:** `--splits all` (the default) predicts every case in `dataset.csv`; `--splits test` predicts only test data; `--split_dir`: when you want to set split.
-- **Segmentation masks:** a checkpoint trained with a mask channel reads the masks from
-  `processed/<dataset>/seg`, or from `--seg_dir`. The label encoding comes from the checkpoint. A
-  checkpoint without a mask channel ignores them.
+- **Masks:** a checkpoint trained with a mask channel reads the masks from
+  `processed/<dataset>/seg`, or from `--seg_dir`. A checkpoint without a mask channel ignores them.
 
 It writes:
 
@@ -278,7 +270,7 @@ It writes:
 - With labels, also `scores.json` (n, accuracy, MAE, MSE, quadratic weighted kappa, and AUC for binary
   tasks) and `confusion_<split>.csv/.png`.
 
-## Outputs of a training run
+## Outputs
 
 ```
 runs/<...>/<run_name>/
@@ -292,8 +284,6 @@ runs/<...>/<run_name>/
 ├── final_metrics.json         completed / early_stopped, best epochs
 └── eval_max_val_score/        predictions_{val,test}.csv + scores.json of the best checkpoint
 ```
-
-
 
 
 ## Notes
@@ -311,8 +301,8 @@ runs/<...>/<run_name>/
   `resnet18_channel` / `resnet50_channel`, `--seg_dir` / `--seg_label_values`) load in `inference.py`
   and as `--finetune_from` sources without conversion, and so do runs from earlier versions of this
   repository (`--mask 2zone` / `5zone`).-->
-- **Memory:** the default batch size is 4 at 112 × 112 × 24. If GPU memory is short, lower
-  `--batch_size` and raise `--grad_accum_steps` so their product stays 64.
+ <!-- - **Memory:** the default batch size is 4 at 112 × 112 × 24. If GPU memory is short, lower
+  `--batch_size` and raise `--grad_accum_steps` so their product stays 64.-->
  <!--- **Docker:** DataLoader workers need shared memory. Start the container with a larger `--shm-size`
   (e.g. `--shm-size 8g`), or use `--num_workers 0`.-->
 
@@ -373,8 +363,7 @@ python train.py "${EXT[@]}" "${FT[@]}" --finetune_from weights/pirads_resnet18_5
   |---|---|---|---|
   | `pirads_*` | `PIRAD_MAX` | 1–5 | `--label_col pirads` |
   | `cspca_*` | `significance_pirads12` | 0, 1 | `--label_col cspca` |
-- **Generalization:** the training data is not public, and results on other scanners, protocols or
-  populations may differ.
+- **Generalization:** results on other scanners, protocols or populations may differ.
 - **Research use only:** the weights are not a medical device.
 
 

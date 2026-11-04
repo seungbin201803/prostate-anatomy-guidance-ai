@@ -1,9 +1,8 @@
 .DS_Store
 __pycache__/
 *.pyc
-# data is never committed: only the layout guide and templates
+# data is never committed: only the templates
 data/*
-!data/README.md
 !data/templates/
 runs/
 results/

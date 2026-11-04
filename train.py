@@ -58,7 +58,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     g = p.add_argument_group("data")
-    g.add_argument("--data_csv", type=str, help="dataset.csv written by preprocess_data.py (see data/README.md)")
+    g.add_argument("--data_csv", type=str, help="dataset.csv written by preprocess_data.py (see README.md, section 1. Data)")
     g.add_argument("--image_dir", type=str, default=None, help="Root of the image paths in --data_csv. Default: its directory.")
     g.add_argument("--split_dir", type=str, default=None,
                    help="Directory with train.csv/val.csv/test.csv (case_id column). Default: --data_csv's split column.")

@@ -3,7 +3,7 @@ Dataset for the channel-stacked classifier: per case, T2/DWI/ADC (and optionally
 on a common grid (img_size, 1x1x3 mm in our experiments, written by preprocess_data.py) are
 z-scored and stacked as channels -> [3 or 4, X, Y, Z]. No augmentation.
 
-Data CSV (--data_csv, see data/README.md):
+Data CSV (--data_csv, see README.md, section 1. Data):
     case_id, t2_path, dwi_path, adc_path   paths relative to --image_dir; a blank DWI/ADC cell (or a
                                            missing file) becomes an all-zero channel
     split                                  only when no --split_dir is given
