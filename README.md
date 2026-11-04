@@ -7,8 +7,7 @@ The pipeline:
 
 - preprocess images (resamplling and cropping centered at given prostate masks).
 - uses T2-weighted, DWI and ADC volumes, stacked as input channels.
-- optionally adds a **segmentation-mask channel**. You provide the masks (e.g. prostate zones) with any
-  integer labels, and the labels are normalized internally.
+- optionally adds a **segmentation-mask channel**. You provide the masks (e.g. prostate zones) with any integer labels, and the labels are normalized internally.
 - predicts **PI-RADS** (ordinal classification, CORAL loss) or **clinically significant prostate cancer** (csPCa; binary classification, cross-entropy loss) per exam.
 - offers three backbones: 3D **ViT**, 3D **ResNet-18**, 3D **ResNet-50**.
 
@@ -20,7 +19,8 @@ seg  ┘  (optional: no mask | mask)
 ```
 
 The data used in our experiments is not public. This repository contains code only, and
-[`data/README.md`](data/README.md) explains how to organize your own data.
+[`data/README.md`](data/README.md) explains how to organize your own data. Trained model weights are
+on Hugging Face (see [Pretrained weights](#pretrained-weights)).
 
 ## Paper
 
@@ -323,6 +323,68 @@ Behaviour to know about:
 - **Docker:** DataLoader workers need shared memory. Start the container with a larger `--shm-size`
   (e.g. `--shm-size 8g`), or use `--num_workers 0`.
 
+## Pretrained weights
+
+Weights of the models trained in our experiments are available on Hugging Face:
+[**spark-25/prostate-anatomy-guidance-ai**](https://huggingface.co/spark-25/prostate-anatomy-guidance-ai).
+
+There are 18 models, one folder per task × backbone × mask:
+
+| folder | task | backbone | mask channel |
+|---|---|---|---|
+| `{pirads,cspca}_{resnet18,resnet50,vit}` | PI-RADS 1–5 / csPCa | ResNet-18 / ResNet-50 / ViT | none (T2/DWI/ADC) |
+| `{pirads,cspca}_{resnet18,resnet50,vit}_2zones` | | | 2-zone mask |
+| `{pirads,cspca}_{resnet18,resnet50,vit}_5zones` | | | 5-zone mask |
+
+Each folder holds the best-validation checkpoint (`backbone_max_val_score.pt`,
+`heads_max_val_score.pt`). 
+<!--Download everything (about 4.3 GB, mostly the ViTs) or only the models you
+need:-->
+
+```bash
+pip install -U huggingface_hub
+hf download spark-25/prostate-anatomy-guidance-ai --local-dir weights
+# or selected models (one --include per pattern)
+hf download spark-25/prostate-anatomy-guidance-ai --local-dir weights \
+    --include "pirads_resnet18/*" --include "pirads_resnet18_5zones/*"
+```
+
+Every checkpoint stores its own arguments, so the architecture, task, classes and mask encoding are
+restored automatically. 
+<!--Pass a downloaded folder wherever a run directory is accepted:-->
+
+```bash
+# predictions (+ scores, if labels are given) on your own preprocessed data
+python inference.py --checkpoint weights/pirads_resnet18_5zones \
+    --data_csv data/processed/<dataset>/dataset.csv \
+    --label_csv data/csv/<dataset>.csv --label_col pirads \
+    --out_dir results/<dataset>/pirads_resnet18_5zones
+
+# fine-tuning on your own cohort (section 4)
+python train.py "${EXT[@]}" "${FT[@]}" --finetune_from weights/pirads_resnet18_5zones \
+    --seg_dir data/processed/<dataset>/seg --run_name pirads_resnet18_5zones
+```
+
+When using the weights:
+
+- **Preprocessing:** process your data the same way (section 2).
+- **Masks:** the `2zones` models expect masks with labels `0,1,2` (channel values 0.5/1.0), and the
+  `5zones` models labels `0,1,2,3,4,5` (0.2/0.4/0.6/0.8/1.0), with background 0. Your masks must use the
+  same labels as the training masks. `inference.py` prints the stored encoding when it loads a model.
+  With the default paths, the masks are read from `processed/<dataset>/seg`.
+- **Label column:** these checkpoints come from the original research code, so their task names
+  differ from this repository's column names. To compute scores, give `--label_col` explicitly. The
+  prediction CSV columns use the checkpoint's task name:
+
+  | models | task name in the checkpoint | classes | your column |
+  |---|---|---|---|
+  | `pirads_*` | `PIRAD_MAX` | 1–5 | `--label_col pirads` |
+  | `cspca_*` | `significance_pirads12` | 0, 1 | `--label_col cspca` |
+- **Generalization:** the training data is not public, and results on other scanners, protocols or
+  populations may differ.
+- **Research use only:** the weights are not a medical device.
+
+
 ## Citation
 
 If you use this code, please cite our paper:
@@ -340,7 +402,14 @@ If you use this code, please cite our paper:
 
 ## Acknowledgements
 
-Built on [MONAI](https://monai.io) (3D ViT / ResNet) and
-[coral-pytorch](https://github.com/Raschka-research-group/coral-pytorch) (Cao et al., *Rank consistent
-ordinal regression for neural networks with application to age estimation*, Pattern Recognition
-Letters 2020).
+- **[MONAI](https://monai.io):** 3D ViT and ResNet backbones.
+- **[coral-pytorch](https://github.com/Raschka-research-group/coral-pytorch):** CORAL ordinal loss.
+  Cao et al., *Rank consistent ordinal regression for neural networks with application to age
+  estimation*, Pattern Recognition Letters 2020.
+- **[ProstateZones](https://github.com/UMU-DDI/ProstateZones):** the zonal masks used to train the
+  [pretrained weights](#pretrained-weights) were obtained with a pretrained nnU-Net for prostatic zone
+  and urethra segmentation, trained on the ProstateZones dataset. W. Holmlund, A. Simkó,
+  K. Söderkvist, P. Palásti, S. Tótin, K. Kalmár, Zs. Domoki, Zs. Fejes, Zs. T. Kincses,
+  P. Brynolfsson, and T. Nyholm, "ProstateZones – Segmentations of the prostatic zones and urethra
+  for the PROSTATEx dataset," *Scientific Data*, vol. 11, no. 1, p. 1097, Oct. 2024.
+

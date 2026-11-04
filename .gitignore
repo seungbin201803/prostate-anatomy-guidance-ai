@@ -6,6 +6,7 @@ data/*
 !data/templates/
 runs/
 results/
+weights/
 data_synthetic/
 runs_synthetic/
 results_synthetic/
