@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+# data is never committed: only the layout guide and templates
+data/*
+!data/README.md
+!data/templates/
+runs/
+results/
+data_synthetic/
+runs_synthetic/
+results_synthetic/

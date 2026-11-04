@@ -1,0 +1,4 @@
+case_id,split,t2,dwi,adc,pirads,cspca
+case_0001,train,case_0001/t2.nii.gz,case_0001/dwi_b1400.nii.gz,case_0001/adc.nii.gz,4,1
+case_0002,val,case_0002/t2.nii.gz,case_0002/dwi_b1400.nii.gz,,2,0
+case_0003,test,case_0003/t2.nii.gz,case_0003/dwi_b1400.nii.gz,case_0003/adc.nii.gz,5,
